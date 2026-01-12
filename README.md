@@ -44,17 +44,77 @@ This prevents:
 
 ---
 
-## 📦 Required Models
+---
 
-### 1️⃣ JoyCaption Models (Required for JoyCaption)
+## 📥 Model Downloads & Requirements
 
-You must install **one JoyCaption-compatible vision model**.
+ReForge Prompt Director does **not** bundle large models.
+You must download the required models manually.
 
-Supported:
-- JoyCaption v1.9.x family
+This is intentional to keep the extension lightweight and transparent.
+
+---
+
+## 🏷️ WD14 Tagger Models (Required for WD14)
+
+### ✅ Recommended (Best Quality)
+
+**WD EVA02 Large Tagger v3**
+
+- ONNX:
+  https://huggingface.co/SmilingWolf/wd-eva02-large-tagger-v3/resolve/main/wd-eva02-large-tagger-v3.onnx
+- CSV:
+  https://huggingface.co/SmilingWolf/wd-eva02-large-tagger-v3/resolve/main/wd-eva02-large-tagger-v3.csv
+
+**Install to:**
+stable-diffusion-webui-reForge/
+└─ models/
+└─ wd14/
+├─ wd-eva02-large-tagger-v3.onnx
+└─ wd-eva02-large-tagger-v3.csv
+
+yaml
+Copy code
+
+---
+
+### 🟡 Alternative (Lower VRAM / Older GPUs)
+
+**WD EVA02 Large Tagger v2**
+
+- ONNX:
+  https://huggingface.co/SmilingWolf/wd-eva02-large-tagger-v2/resolve/main/wd-eva02-large-tagger-v2.onnx
+- CSV:
+  https://huggingface.co/SmilingWolf/wd-eva02-large-tagger-v2/resolve/main/wd-eva02-large-tagger-v2.csv
+
+This version is slightly less accurate but still fully supported.
+
+---
+
+### ⚙️ Configure Paths
+
+After downloading:
+
+1. Open **WebUI → Settings → WD14 Tagger**
+2. Set:
+   - WD14 Model Path → `.onnx`
+   - WD14 Tags Path → `.csv`
+3. Click **Apply settings**
+4. Restart WebUI
+
+Paths are stored in WebUI config, **not** in this extension.
+
+---
+
+## 🧠 JoyCaption Models (Required for JoyCaption)
+
+JoyCaption requires a **vision-capable caption model**.
+
+Supported families include:
+- JoyCaption v1.9.x
 - Qwen-VL compatible caption models
 
-Place models in:
+**Install to:**
 stable-diffusion-webui-reForge/
 └─ models/
 └─ joycaption/
@@ -62,28 +122,57 @@ stable-diffusion-webui-reForge/
 yaml
 Copy code
 
-⚠️ JoyCaption will **not auto-download models**.
+⚠️ Models are **not auto-downloaded**.
+
+If JoyCaption fails to load, the model is missing or incorrectly placed.
 
 ---
 
-### 2️⃣ WD14 Tagger Models (Required for WD14)
+## 💾 Minimum System Requirements
 
-You must provide:
+### ✅ GPU VRAM
 
-- **WD14 ONNX model**
-- **WD14 tags CSV**
+- **Minimum:** 11 GB VRAM (Low VRAM Mode)
+- **Recommended:** 16 GB+ VRAM
 
-Recommended:
-- `wd-v1-4-vit-tagger-v2.onnx`
-- `tags.csv`
+ReForge Prompt Director is designed to work efficiently:
 
-Set paths in:
-Settings → WD14 Tagger
+- WD14 uses ONNX inference (lightweight)
+- JoyCaption supports quantized models
+- Models are loaded only when needed
+- No duplicate image processing per batch
 
-yaml
-Copy code
+On **11 GB GPUs**, most workflows work correctly when:
+- Low VRAM mode is enabled
+- Large SDXL checkpoints are avoided
+- One vision model is loaded at a time
 
-Paths are stored in **WebUI settings**, not in this extension.
+---
+
+### 🧮 CPU / RAM
+
+- CPU: Any modern x64 CPU
+- System RAM: 16 GB minimum (32 GB recommended for large batches)
+
+---
+
+### 🧠 What “Low VRAM Mode” means
+
+Low VRAM mode:
+- Avoids holding multiple large models in memory
+- Loads vision models only when used
+- Releases intermediate buffers aggressively
+
+This allows **image captioning + tagging** to run even on mid-range GPUs.
+
+---
+
+## ⚠️ Common Mistakes
+
+- WD14 does nothing → ONNX/CSV paths not set
+- JoyCaption fails → model not installed
+- Batch captions repeat → restart WebUI after install
+- OOM errors → enable Low VRAM mode or reduce batch size
 
 ---
 
@@ -181,3 +270,4 @@ Disabling one module does **not** break the others.
 - If batching breaks → restart WebUI after install
 
 ---
+

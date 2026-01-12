@@ -303,4 +303,24 @@ to survive ReForge’s prompt/batch recreation behavior.
 
 ---
 
+## ⚙️ Compatibility Notice
+
+ReForge Prompt Director is built and tested **exclusively for**
+**Stable Diffusion WebUI ReForge (Classic)**.
+
+GitHub:
+https://github.com/Haoming02/sd-webui-forge-classic
+
+It is **not guaranteed** to function correctly on:
+- Automatic1111 base WebUI
+- Forge Next or other experimental forks
+- ComfyUI or non-WebUI frontends
+
+### ✅ Tested Environment
+- ReForge Classic (latest)
+- Python 3.10+
+- CUDA 12.x
+- Windows 10 / 11
+
+
 

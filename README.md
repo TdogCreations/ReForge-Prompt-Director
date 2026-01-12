@@ -73,9 +73,6 @@ stable-diffusion-webui-reForge/
 ├─ wd-eva02-large-tagger-v3.onnx
 └─ wd-eva02-large-tagger-v3.csv
 
-yaml
-Copy code
-
 ---
 
 ### 🟡 Alternative (Lower VRAM / Older GPUs)
@@ -106,27 +103,80 @@ Paths are stored in WebUI config, **not** in this extension.
 
 ---
 
-## 🧠 JoyCaption Models (Required for JoyCaption)
+✅ Official Joy Capation Model (Recommended)
 
-JoyCaption requires a **vision-capable caption model**.
+llama-joycaption-beta-one
 
-Supported families include:
-- JoyCaption v1.9.x
-- Qwen-VL compatible caption models
+Hugging Face repository:
+👉 https://huggingface.co/tsunemoto/llama-joycaption-beta-one
 
-**Install to:**
+⚠️ You must be logged into Hugging Face to download.
+
+📂 Install Location (IMPORTANT)
+
+Place the model exactly here:
+
 stable-diffusion-webui-reForge/
 └─ models/
-└─ joycaption/
+   └─ LLM/
+      └─ llama-joycaption-beta-one/
+         ├─ config.json
+         ├─ generation_config.json
+         ├─ model.safetensors
+         ├─ tokenizer.json
+         ├─ tokenizer_config.json
+         └─ special_tokens_map.json
 
-yaml
-Copy code
 
-⚠️ Models are **not auto-downloaded**.
+❌ Do NOT rename the folder
+❌ Do NOT place it in Stable Diffusion checkpoint folders
+❌ Do NOT put it inside the extension directory
 
-If JoyCaption fails to load, the model is missing or incorrectly placed.
+⚙️ Configure JoyCaption Path
 
----
+After installing the model:
+
+Open WebUI → Settings → JoyCaption
+
+Set JoyCaption Model Path to:
+
+E:\New Reforge\stable-diffusion-webui-reForge\models\LLM\llama-joycaption-beta-one
+
+
+Click Apply settings
+
+Restart WebUI
+
+JoyCaption will only load the model when needed, not at startup.
+
+💾 VRAM Requirements (JoyCaption)
+Mode	VRAM Required
+4-bit (Fastest)	~6–7 GB
+8-bit (Balanced)	~8–9 GB
+Full FP16	~11–12 GB
+
+👉 Low VRAM mode allows JoyCaption to run on 11 GB GPUs reliably
+👉 Works alongside WD14 without exceeding memory when configured correctly
+
+⚠️ Common JoyCaption Issues
+
+❌ Model doesn’t load → wrong folder path
+
+❌ “Model path invalid” → missing files
+
+❌ CUDA OOM → disable Full FP16 or enable Low VRAM
+
+❌ Batch repeats captions → restart WebUI after model install
+
+🧠 Why this model?
+
+Vision + language trained specifically for captions
+
+Stable with quantization (4/8-bit)
+
+Works cleanly with ReForge batch handling
+
+Designed for prompt generation, not chat fluff
 
 ## 💾 Minimum System Requirements
 
@@ -147,14 +197,6 @@ On **11 GB GPUs**, most workflows work correctly when:
 - Large SDXL checkpoints are avoided
 - One vision model is loaded at a time
 
----
-
-### 🧮 CPU / RAM
-
-- CPU: Any modern x64 CPU
-- System RAM: 16 GB minimum (32 GB recommended for large batches)
-
----
 
 ### 🧠 What “Low VRAM Mode” means
 
@@ -270,4 +312,5 @@ Disabling one module does **not** break the others.
 - If batching breaks → restart WebUI after install
 
 ---
+
 

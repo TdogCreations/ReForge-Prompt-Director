@@ -7,7 +7,7 @@ from PIL import Image
 from modules import scripts, shared, script_callbacks
 
 # ==========================================================
-# JoyCaption Ultra v1.0.0 (Integrated) — FIXED FOR REFORGE BATCH
+# JoyCaption Ultra v1.9.6+ (Integrated) — FIXED FOR REFORGE BATCH
 # Creator: TdogCreations
 #
 # Key Fixes in THIS build:
@@ -16,6 +16,8 @@ from modules import scripts, shared, script_callbacks
 # ✅ WD14 bridge supports PIL / np / {"name":path} / path string
 # ✅ DEBUG prints so you can see if JoyCaption is actually running
 # ==========================================================
+
+print("🔥🔥🔥 JoyCaption Ultra SCRIPT IMPORTED 🔥🔥🔥")
 
 # transformers import (keep script loadable even if HF/bnb is broken)
 try:
@@ -51,7 +53,9 @@ WD14_CHAR_DESIGN_KEYWORDS = [
 ]
 
 WD14_SEXUAL_BAN_WORDS = [
-    "hi mom", 
+    "nsfw", "nude", "naked", "sex", "penis", "pussy", "vagina", "testicles",
+    "cum", "ejaculation", "semen", "sperm", "intercourse", "anal", "vaginal",
+    "blowjob", "handjob", "fellatio", "rape", "molestation",
 ]
 
 # ----------------------------------------------------------
@@ -135,7 +139,8 @@ def _is_minor_age_label(age_label: str) -> bool:
         return False
     s = str(age_label).lower()
     minor_markers = [
-        "hi mom",
+        "newborn", "baby", "young child", "child", "pre-teen", "preteen", "teen",
+        "toddler", "kid", "loli", "shota",
     ]
     return any(k in s for k in minor_markers)
 
@@ -169,8 +174,6 @@ def _save_settings(d: dict) -> bool:
 
 class JoyCaptionUltra(scripts.Script):
     def __init__(self):
-        super().__init__()
-
         self.model = None
         self.processor = None
         self.current_path = None
@@ -185,16 +188,19 @@ class JoyCaptionUltra(scripts.Script):
         self.wd_current_onnx = None
         self.wd_current_csv = None
 
-        # 🔥 REQUIRED: survive ReForge batch recreation
+        # 🔥 IMPORTANT: survive forks that recreate `p` per batch
         self._active_cfg = None
         self._search_pos = 0
-        self._global_cursor = 0
-        self._job_sig = None
 
-        # cached WD14 attribute discovery
+        # optional: cached discovered WD14 attribute names
         self._wd14_slot_attr_candidates = None
         self._wd14_paths_attr_candidates = None
 
+    def title(self):
+        return "JoyCaption Ultra v1.9.6+ (Integrated)"
+
+    def show(self, is_img2img):
+        return scripts.AlwaysVisible
 
     # ======================================================
     # Unload / VRAM helpers
@@ -999,6 +1005,7 @@ class JoyCaptionUltra(scripts.Script):
 
             with gr.Tabs():
                 with gr.TabItem("Joy Core"):
+                    gr.Markdown("### JoyCaption Ultra\nCreator: **TdogCreations**")
 
                     enabled = gr.Checkbox(label="Enable JoyCaption", value=d_enabled)
 
@@ -1712,7 +1719,7 @@ class JoyCaptionUltra(scripts.Script):
                 )
 
                 if _is_minor_age_label(str(age_group)):
-                    required_text = (required_text + ", " if required_text else "") + "high quailty"
+                    required_text = (required_text + ", " if required_text else "") + "fully clothed, non-sexual, safe"
                     banned_text = (banned_text + ", " if banned_text else "") + ", ".join(WD14_SEXUAL_BAN_WORDS)
 
                 hard_rules = []
@@ -1731,7 +1738,7 @@ class JoyCaptionUltra(scripts.Script):
                 if rep_character and character_override:
                     hard_rules.append("Character appearance MUST match the provided Character Override.")
                 if _is_minor_age_label(str(age_group)):
-                    hard_rules.append("The charaters must be underage")
+                    hard_rules.append("Keep the output fully non-sexual.")
                 hard_rules_text = " ".join(hard_rules).strip()
 
                 c = captions[bi] or ""
@@ -1751,6 +1758,21 @@ class JoyCaptionUltra(scripts.Script):
 
             captions = rewritten_caps
 
+        # switches post rewrite (disabled for minors)
+        if _is_minor_age_label(str(age_group)):
+            switch_rules = self._build_switch_replacements(
+                gender_swap_mode=switch_gender_swap_mode,
+                vaginal_to_oral=False,
+                cum_to_no_cum=False,
+                no_pubic_hair=False,
+            )
+        else:
+            switch_rules = self._build_switch_replacements(
+                gender_swap_mode=switch_gender_swap_mode,
+                vaginal_to_oral=switch_vaginal_to_oral,
+                cum_to_no_cum=switch_cum_to_no_cum,
+                no_pubic_hair=switch_no_pubic_hair,
+            )
 
         if switch_rules:
             captions = [
@@ -1819,7 +1841,7 @@ class JoyCaptionUltra(scripts.Script):
                     img_pil=img_i,
                 )
                 if _is_minor_age_label(str(age_group)):
-                    required_text = (required_text + ", " if required_text else "") + "high quality"
+                    required_text = (required_text + ", " if required_text else "") + "fully clothed, non-sexual, safe"
                     banned_text = (banned_text + ", " if banned_text else "") + ", ".join(WD14_SEXUAL_BAN_WORDS)
 
                 blocks = []

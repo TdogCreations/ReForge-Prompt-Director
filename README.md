@@ -130,9 +130,9 @@ stable-diffusion-webui-reForge/
 ### VRAM (JoyCaption)
 | Mode | Typical VRAM |
 |---|---:|
-| 4-bit (Fastest) | ~6–7 GB |
-| 8-bit (Balanced) | ~8–9 GB |
-| Full FP16 | ~11–12 GB |
+| 4-bit (Fastest) | ~10–12 GB |
+| 8-bit (Balanced) | ~17–18 GB |
+| Full FP16 | ~24–25 GB |
 
 **Minimum recommended GPU:** **11 GB VRAM** (with Low VRAM mode)  
 **Recommended:** **16 GB+ VRAM** for smoother multi-model workflows
@@ -217,3 +217,4 @@ to survive ReForge’s prompt/batch recreation behavior.
 - **Captions repeat** → restart WebUI after installing models (first-time load)
 
 ---
+

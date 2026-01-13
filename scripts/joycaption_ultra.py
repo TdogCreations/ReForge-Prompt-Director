@@ -201,6 +201,30 @@ class JoyCaptionUltra(scripts.Script):
 
     def show(self, is_img2img):
         return scripts.AlwaysVisible
+        
+    # ======================================================
+    # NAI auto-patch (runs once per generation)
+    # ======================================================
+    def before_process(self, p, *args, **kwargs):
+        if getattr(self, "_nai_patched", False):
+            return
+
+        try:
+            import os, importlib.util
+
+            here = os.path.dirname(os.path.abspath(__file__))  # .../scripts
+            patch_path = os.path.join(here, "patch", "nai_compat_patch.py")
+
+            spec = importlib.util.spec_from_file_location("joycap_nai_compat_patch", patch_path)
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+
+            mod.apply_nai_patch()
+            self._nai_patched = True
+
+        except Exception as e:
+            print(f"⚠️ [JoyCaption] Failed to apply NAI patch: {e}")
+
 
     # ======================================================
     # Unload / VRAM helpers
@@ -223,6 +247,7 @@ class JoyCaptionUltra(scripts.Script):
         except Exception:
             pass
         self._hard_unload()
+        self._nai_patched = False
         return "✅ JoyCaption unloaded (model cleared + CUDA cache flushed)."
 
     def _ui_on_enabled_change(self, enabled_val):
@@ -1886,3 +1911,5 @@ class JoyCaptionUltra(scripts.Script):
         if isinstance(cfg, dict):
             if (not cfg.get("keep_vram")) or cfg.get("low_vram"):
                 self._hard_unload()
+        # Allow re-patching if needed
+        self._nai_patched = False

@@ -1,0 +1,17 @@
+# User-specific settings (generated at runtime by the plugin)
+scripts/*_settings.json
+*_settings.json
+
+# Python bytecode
+__pycache__/
+*.py[cod]
+
+# Editor / backup files
+*.bak
+*.bak-*
+*.bak.*
+*~
+
+# OS cruft
+.DS_Store
+Thumbs.db

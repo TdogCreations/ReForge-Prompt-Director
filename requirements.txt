@@ -1,0 +1,9 @@
+# ReForge Prompt Director - Python dependencies
+# Most SD WebUI installs already include torch, numpy, opencv, Pillow, requests, transformers.
+# These are the ones most commonly missing:
+
+onnxruntime      # WD14 Tagger ONNX inference
+pandas           # WD14 tags.csv parsing
+ultralytics      # YOLO per-person detection for multi-character CHAR blocks
+
+# JoyCaption additionally needs: transformers (usually present) and, for 4/8-bit, bitsandbytes.

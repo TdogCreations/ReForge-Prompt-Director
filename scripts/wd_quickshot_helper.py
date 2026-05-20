@@ -1,17 +1,10 @@
+# wd_quickshot_helper.py
 import random
+from typing import Optional, Callable, Tuple
 
 # ==========================================================
 # AGE MAP
 # ==========================================================
-# IMPORTANT SAFETY NOTE:
-# - If you use *minor* age groups, this helper will BLOCK adding explicit rating.
-# - If age_group is a minor AND rating_val > 0, we force rating_val = 0 and push
-#   "rating:explicit" into negative_prompt automatically.
-#
-# If you only want adults, delete the minor entries and keep:
-#   "Young Adult", "Adult", "Older Adult"
-# ==========================================================
-
 AGE_PROMPT_MAP = {
     # --- minors (allowed for non-explicit content; explicit rating is blocked) ---
     "Newborn": "newborn, baby, infant, tiny, very young",
@@ -27,13 +20,8 @@ AGE_PROMPT_MAP = {
     "Older Adult": "older adult, 50+, mature, wrinkles, aging features",
 }
 
-# Defines which options count as "adult" for guardrails
 ADULT_AGE_GROUPS = {"Young Adult", "Adult", "Older Adult"}
 
-# ==========================================================
-# TIME OF DAY MAP (FULL PHRASES)
-# These will be injected as multiple comma-separated tags.
-# ==========================================================
 TIME_OF_DAY_MAP = {
     "dawn": "dawn, early morning, soft light, golden hour, sunrise, warm glow, gentle lighting, natural light, soft shadows",
     "midday": "midday, bright daylight, harsh lighting, sharp shadows, vivid colors, high contrast, intense light",
@@ -41,9 +29,6 @@ TIME_OF_DAY_MAP = {
     "midnight": "midnight, night, low light, moonlight, dark ambiance, noir lighting, shadowy, mysterious atmosphere",
 }
 
-# ==========================================================
-# VIEWPOINT MAP (more useful camera phrasing)
-# ==========================================================
 VIEWPOINT_MAP = {
     "from above": "high angle, from above",
     "from below": "low angle, from below",
@@ -53,12 +38,7 @@ VIEWPOINT_MAP = {
 }
 
 
-def _age_strength_to_weight(age_strength: int, nai_mode: bool) -> float | None:
-    """
-    Maps 0–10 to a weight.
-    - NAI: up to 6.0
-    - SD/XL: up to 1.7 (we intentionally do NOT clamp to 1.5 for age)
-    """
+def _age_strength_to_weight(age_strength: int, nai_mode: bool) -> Optional[float]:
     try:
         s = int(age_strength)
     except Exception:
@@ -69,42 +49,17 @@ def _age_strength_to_weight(age_strength: int, nai_mode: bool) -> float | None:
         return None
 
     if nai_mode:
-        # 10 -> 6.0
-        w = 1.0 + (s * 0.5)
+        w = 1.0 + (s * 0.5)   # 10 -> 6.0
         return min(6.0, w)
 
-    # XL/Pony: 10 -> 1.7
-    w = 1.0 + (s * 0.07)
+    w = 1.0 + (s * 0.07)      # 10 -> 1.7
     return min(1.7, w)
 
 
 def _split_tags(phrase: str) -> list[str]:
-    """
-    Split comma-separated phrase into clean tags.
-    """
     if not phrase:
         return []
     return [t.strip() for t in phrase.split(",") if t.strip()]
-
-
-def _append_weighted_tags(auto_tags: list[str], tags: list[str], weight: float, nai_mode: bool, maybe_weight, clamp_weight_xl):
-    """
-    Append tags with weighting.
-    - For nai_mode: use maybe_weight directly (supports large weights).
-    - For SD/XL: we convert weight to "prompt-style" weights. If weight is huge,
-      clamp_weight_xl will keep it sane. (Except age weights handled elsewhere.)
-    """
-    for t in tags:
-        if not t:
-            continue
-        if nai_mode:
-            auto_tags.append(maybe_weight(t, float(weight), nai_mode=True))
-        else:
-            # convert "scale-like" weights into something gentle
-            # If user passes 0–5, we treat it as intensity.
-            # Here we assume weight is already a proper weight value.
-            w = clamp_weight_xl(float(weight))
-            auto_tags.append(maybe_weight(t, w, nai_mode=False))
 
 
 def apply_quickshot(
@@ -136,28 +91,25 @@ def apply_quickshot(
 
     remove_baby_props: bool,
 
-    maybe_weight,
-    clamp_weight_xl,
-):
+    maybe_weight: Callable[[str, float, bool], str],
+    clamp_weight_xl: Callable[[float], float],
+) -> Tuple[str, str]:
+
+    prompt = prompt or ""
+    negative_prompt = negative_prompt or ""
+
     auto_tags: list[str] = []
     auto_neg: list[str] = []
-
     mult = 0.40 if nai_mode else 0.10
 
-    # ======================================================
-    # SAFETY: if MINOR age group + explicit rating requested
-    # ======================================================
+    # Guardrail: if minor + explicit requested, block explicit
     is_minor = bool(age_group and age_group != "None" and age_group not in ADULT_AGE_GROUPS)
-    if is_minor and rating_val > 0:
-        # force off explicit injection and ban it
+    if rating_val > 0:
         rating_val = 0
-        # ensure "explicit" is discouraged
         if "rating:explicit" not in (negative_prompt or ""):
             negative_prompt = (negative_prompt + ", rating:explicit").strip(", ")
 
-    # ---------------------------------------
-    # Suppress baby props (pacifier / bib)
-    # ---------------------------------------
+    # Suppress baby props
     if remove_baby_props:
         if nai_mode:
             auto_tags.append("(pacifier:-3)")
@@ -166,27 +118,15 @@ def apply_quickshot(
             auto_neg.append("(pacifier:1.5)")
             auto_neg.append("(bib:1.5)")
 
-    # ---------------------------------------
-    # AGE GROUP + STRENGTH
-    # ---------------------------------------
+    # Age group + strength
     if age_group and age_group != "None":
         phrase = AGE_PROMPT_MAP.get(age_group)
         w_age = _age_strength_to_weight(age_strength, nai_mode)
-
         if phrase and w_age is not None:
-            age_tags = _split_tags(phrase)
-
-            # IMPORTANT:
-            # For age weights, we intentionally do NOT clamp to 1.5 in SD/XL,
-            # because you asked for up to 1.7 behavior.
-            for t in age_tags:
-                if not t:
-                    continue
+            for t in _split_tags(phrase):
                 auto_tags.append(f"({t}:{float(w_age):.2f})")
 
-    # ---------------------------------------
     # Rating
-    # ---------------------------------------
     if rating_val > 0:
         w = 1.0 + (float(rating_val) * mult)
         if not nai_mode:
@@ -199,9 +139,7 @@ def apply_quickshot(
         else:
             negative_prompt = (negative_prompt + ", rating:explicit").strip(", ")
 
-    # ---------------------------------------
     # Indoor/Outdoor
-    # ---------------------------------------
     if io_val > 0:
         w = 1.0 + (float(io_val) * mult)
         if not nai_mode:
@@ -213,9 +151,7 @@ def apply_quickshot(
             w = clamp_weight_xl(w)
         auto_tags.append(maybe_weight("outdoor", w, nai_mode=nai_mode))
 
-    # ---------------------------------------
     # Multiple views
-    # ---------------------------------------
     if view_val > 0:
         w = 1.0 + (float(view_val) * mult)
         if not nai_mode:
@@ -223,27 +159,20 @@ def apply_quickshot(
         auto_tags.append(maybe_weight("multiple views", w, nai_mode=nai_mode))
         auto_tags.append("split view")
 
-    # ---------------------------------------
-    # Time of day (FULL PHRASE)
-    # ---------------------------------------
+    # Time of day
     t_choice = random.choice(["dawn", "midday", "sunset", "midnight"]) if time_of_day == "Random" else time_of_day
     if t_choice and t_choice != "None" and float(time_weight) > 0:
         phrase = TIME_OF_DAY_MAP.get(t_choice, t_choice)
         t_tags = _split_tags(phrase)
-
         if nai_mode:
-            # In NAI mode, apply the user weight directly
             for t in t_tags:
                 auto_tags.append(maybe_weight(t, float(time_weight), nai_mode=True))
         else:
-            # In SD/XL, make it gentle (like your old logic)
             w = clamp_weight_xl(1.0 + (float(time_weight) * 0.1))
             for t in t_tags:
                 auto_tags.append(maybe_weight(t, w, nai_mode=False))
 
-    # ---------------------------------------
     # Lighting
-    # ---------------------------------------
     l_choice = random.choice([
         "from the left", "from the right", "from above", "from the side", "from below", "from behind"
     ]) if vol_light == "Random" else vol_light
@@ -256,19 +185,17 @@ def apply_quickshot(
             w = clamp_weight_xl(1.0 + (float(vol_weight) * 0.1))
             auto_tags.append(maybe_weight(phrase, w, nai_mode=False))
 
-    # ---------------------------------------
-    # Viewpoint + Scale (FULL PHRASE)
-    # ---------------------------------------
-    vp_choice = None
+    # Viewpoint + scale
     if viewpoint == "Random":
         vp_choice = random.choice(["from above", "from below", "from side", "from behind", "from the front"])
     elif viewpoint and viewpoint != "None":
         vp_choice = viewpoint
+    else:
+        vp_choice = None
 
     if vp_choice:
         phrase = VIEWPOINT_MAP.get(vp_choice, vp_choice)
         vp_tags = _split_tags(phrase)
-
         try:
             vs = float(viewpoint_scale)
         except Exception:
@@ -291,9 +218,7 @@ def apply_quickshot(
     if dutch_angle:
         auto_tags.append("dutch angle")
 
-    # ---------------------------------------
-    # Blur logic
-    # ---------------------------------------
+    # Blur
     if fg_blur > 0:
         w = 1.0 + (float(fg_blur) * mult)
         if not nai_mode:
@@ -324,9 +249,7 @@ def apply_quickshot(
             auto_tags.append("deep focus")
             auto_tags.append("sharp background")
 
-    # ---------------------------------------
-    # Apply injection mode
-    # ---------------------------------------
+    # Inject
     pos_payload = ", ".join([t for t in auto_tags if t]).strip()
     neg_payload = ", ".join([t for t in auto_neg if t]).strip()
 
@@ -335,7 +258,7 @@ def apply_quickshot(
             prompt = f"{pos_payload}, {prompt}".strip(", ")
         elif inject_mode == "Replace":
             prompt = pos_payload
-        else:  # Append
+        else:
             prompt = f"{prompt}, {pos_payload}".strip(", ")
 
     if neg_payload:

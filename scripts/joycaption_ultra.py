@@ -6,6 +6,11 @@ import onnxruntime as ort
 from PIL import Image
 from modules import scripts, shared, script_callbacks
 
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+if SCRIPT_DIR not in sys.path:
+    sys.path.append(SCRIPT_DIR)
+
+from nai_char_prompt_builder import inject_global_before_chars, merge_chars_into_prompt
 # ==========================================================
 # JoyCaption Ultra v1.9.6+ (Integrated) — FIXED FOR REFORGE BATCH
 # Creator: TdogCreations
@@ -18,6 +23,74 @@ from modules import scripts, shared, script_callbacks
 # ==========================================================
 
 print("🔥🔥🔥 JoyCaption Ultra SCRIPT IMPORTED 🔥🔥🔥")
+# ==========================================================
+# JoyCaption → per-character block output (for later parsing)
+# ==========================================================
+CHAR_BLOCK_INSTRUCTION = """
+You must identify up to {max_chars} distinct characters if multiple people are present.
+
+Output MUST be ONLY these blocks (no extra text):
+
+[GLOBAL] comma-separated scene/environment tags, camera, lighting, mood [/GLOBAL]
+[CHAR1] comma-separated tags for character 1: hair, eyes, outfit, expression, action, pose, position hints (left/right/foreground/background) [/CHAR1]
+[CHAR2] comma-separated tags for character 2: hair, eyes, outfit, expression, action, pose, position hints (left/right/foreground/background) [/CHAR2]
+... up to [CHAR6]
+
+Rules:
+- Use short tag-like phrases, separated by commas.
+- If only one character, output only [CHAR1].
+- If unsure about a trait, omit it.
+""".strip()
+
+def _extract_block(text: str, name: str) -> str:
+    if not text:
+        return ""
+    # Closed form: [NAME] ... [/NAME]
+    m = re.search(rf"\[{name}\](.*?)\[/\s*{name}\]", text, flags=re.I | re.S)
+    if m:
+        return m.group(1).strip()
+    # Tolerant fallback (model omitted the closing tag): from [NAME] until the next
+    # [GLOBAL]/[CHARn] marker (open or close) or end of text.
+    m = re.search(rf"\[{name}\](.*?)(?=\[/?\s*(?:GLOBAL|CHAR\d+)\s*\]|$)", text, flags=re.I | re.S)
+    return (m.group(1).strip() if m else "")
+
+
+def _strip_block_labels(text: str) -> str:
+    """Remove any [GLOBAL]/[CHARn]/[/...] markers so they can never leak into a prompt."""
+    if not text:
+        return text
+    return re.sub(r"\[/?\s*(?:GLOBAL|CHAR\d+)\s*\]", " ", text, flags=re.I).strip()
+
+def _split_tags(s: str):
+    if not s:
+        return []
+    # NovelAI V4 expects SPACES, not underscores — normalize Danbooru-style underscores.
+    items = [re.sub(r"\s+", " ", t.strip().replace("_", " ")) for t in re.split(r"[,\n;]+", s) if t.strip()]
+    # de-dupe, keep order
+    out = []
+    seen = set()
+    for t in items:
+        if not t:
+            continue
+        k = t.lower()
+        if k not in seen:
+            seen.add(k)
+            out.append(t)
+    return out
+
+def parse_char_blocks(text: str, max_chars: int = 6):
+    """
+    Returns (global_tags_str, [char1_tags_list, char2_tags_list, ...])
+    """
+    g = _extract_block(text, "GLOBAL")
+    chars = []
+    for i in range(1, max_chars + 1):
+        body = _extract_block(text, f"CHAR{i}")
+        tags = _split_tags(body)
+        if tags:
+            chars.append(tags)
+    return (", ".join(_split_tags(g)), chars)
+
 
 # transformers import (keep script loadable even if HF/bnb is broken)
 try:
@@ -52,6 +125,19 @@ WD14_CHAR_DESIGN_KEYWORDS = [
     "apron", "cape", "scarf", "tie", "ribbon", "belt", "boots",
 ]
 
+# Used by the CHAR-block fallback when the captioning model fails to split characters and dumps
+# every tag into [GLOBAL]. Substring-matched against each tag to pull appearance tags into CHAR1.
+# Broader than the design list above (adds expression / body / gender / hair-style terms).
+_CHAR_FALLBACK_KEYWORDS = sorted(set(WD14_CHAR_DESIGN_KEYWORDS + [
+    "hair", "eye", "eyes", "face", "blush", "smile", "frown", "mouth", "teeth", "tongue", "fang",
+    "lips", "expression", "looking", "skin", "freckles", "muscular", "breast", "nipple",
+    "navel", "cleavage", "thigh", "midriff",
+    "girl", "boy", "woman", "man", "male", "female", "solo",
+    "ponytail", "twintail", "braid", "bangs", "ahoge", "sidelocks",
+    "horn", "wing", "halo", "tattoo", "piercing", "earring",
+    "nude", "naked", "topless", "bottomless",
+]))
+
 WD14_SEXUAL_BAN_WORDS = [
     "nsfw", "nude", "naked", "sex", "penis", "pussy", "vagina", "testicles",
     "cum", "ejaculation", "semen", "sperm", "intercourse", "anal", "vaginal",
@@ -66,15 +152,28 @@ def on_ui_settings():
     shared.opts.add_option(
         "joycaption_model_path",
         shared.OptionInfo(
-            r"E:\Comfy Ui\ComfyUI_windows_portable\ComfyUI\models\LLM\llama-joycaption-beta-one",
-            "JoyCaption Model Path",
+            "",
+            "JoyCaption Model Path (set this to your local JoyCaption model folder)",
             gr.Textbox,
             {"interactive": True},
             section=section,
         ),
     )
+    shared.opts.add_option(
+        "joycaption_char_debug",
+        shared.OptionInfo(False, "Print CHAR-block debug to console (JoyCaption)", section=section),
+    )
 
 script_callbacks.on_ui_settings(on_ui_settings)
+
+
+def _char_debug(msg):
+    """Console debug for the CHAR pipeline; gated by Settings -> JoyCaption -> 'Print CHAR-block debug'."""
+    try:
+        if getattr(shared.opts, "joycaption_char_debug", False):
+            print(msg)
+    except Exception:
+        pass
 
 
 def _ensure_pil(img):
@@ -135,14 +234,7 @@ def _split_csv_line(line: str):
 
 
 def _is_minor_age_label(age_label: str) -> bool:
-    if not age_label:
-        return False
-    s = str(age_label).lower()
-    minor_markers = [
-        "newborn", "baby", "young child", "child", "pre-teen", "preteen", "teen",
-        "toddler", "kid", "loli", "shota",
-    ]
-    return any(k in s for k in minor_markers)
+    return False
 
 
 def _looks_like_bnb_dtype_crash(msg: str) -> bool:
@@ -207,6 +299,12 @@ class JoyCaptionUltra(scripts.Script):
     # ======================================================
     def before_process(self, p, *args, **kwargs):
         if getattr(self, "_nai_patched", False):
+            return
+
+        # Process-wide guard (see wd_tagger_box): the patch reloads itself fresh each
+        # call, so the only flag that survives is this one on modules.shared.
+        if getattr(shared, "_nai_compat_patch_done", False):
+            self._nai_patched = True
             return
 
         try:
@@ -609,12 +707,13 @@ class JoyCaptionUltra(scripts.Script):
         low_vram: bool,
         force_rerun: bool,
         auto_fallback_fp16: bool,
+        structured_chars: bool = False,
         _already_retried: bool = False
     ):
         if img_pil is None:
             return ""
 
-        key = f"{_hash_image(img_pil)}|{prompt_style}|{max_len}|{quantization}"
+        key = f"{_hash_image(img_pil)}|{prompt_style}|{max_len}|{quantization}|SC{int(bool(structured_chars))}"
         if not force_rerun:
             cached = self._cap_cache_get(key)
             if cached:
@@ -626,6 +725,18 @@ class JoyCaptionUltra(scripts.Script):
         image_token = self._pick_image_token()
 
         style_map = {
+            "🧪 Experimental (Character Tags)": (
+                "You are an expert NovelAI (anime diffusion) prompt writer. Use ONLY concise, "
+                "comma-separated booru-style tags and short phrases — never full sentences. "
+                "Write every tag with SPACES between words (blue hair, NOT blue_hair); NovelAI V4 uses "
+                "spaces, never underscores. "
+                "For EACH character (left-to-right) capture: hair (length/style/color), eyes (color and "
+                "expression), face/expression, outfit and accessories with colors, body, pose/action, and "
+                "screen position; refer to a single character as girl/boy (not 1girl). "
+                "Separately capture the scene: overall subject count (e.g. 2girls, 1boy), setting/background, "
+                "composition, camera angle/shot, lighting, mood. "
+                "Describe only what is clearly visible, omit anything uncertain, and never invent names or real people."
+            ),
             "Descriptive": "Describe this image in great detail.",
             "Descriptive (Casual)": "Describe this image casually.",
             "Straightforward": "Give a straightforward description.",
@@ -640,6 +751,9 @@ class JoyCaptionUltra(scripts.Script):
             "Social Media Post": "Write an engaging social media post (short phrases).",
         }
         user_msg = style_map.get(prompt_style, "Describe this image.")
+        # If enabled, force structured [GLOBAL]/[CHARx] blocks for later parsing
+        if structured_chars:
+            user_msg = user_msg.rstrip() + "\n\n" + CHAR_BLOCK_INSTRUCTION.format(max_chars=6)
 
         text_prompt = None
         try:
@@ -712,8 +826,10 @@ class JoyCaptionUltra(scripts.Script):
                     low_vram=False,
                     force_rerun=True,
                     auto_fallback_fp16=False,
+                    structured_chars=structured_chars,   # ✅ keep structured mode
                     _already_retried=True
                 )
+
             return ""
 
     # ======================================================
@@ -991,6 +1107,7 @@ class JoyCaptionUltra(scripts.Script):
 
         quant_choices = ["4-bit (Fastest)", "8-bit (Balanced)", "None (Full 16-bit)"]
         style_choices = [
+            "🧪 Experimental (Character Tags)",
             "Descriptive",
             "Descriptive (Casual)",
             "Straightforward",
@@ -1005,12 +1122,12 @@ class JoyCaptionUltra(scripts.Script):
             "Social Media Post",
         ]
 
-        d_enabled = bool(_get("enabled", False))
+        d_enabled = False  # always start OFF on page load/refresh (per user request), regardless of saved settings
         d_quant = _safe_choice(_get("quantization", "4-bit (Fastest)"), quant_choices, "4-bit (Fastest)")
         d_style = _safe_choice(_get("prompt_style", "Stable Diffusion Prompt"), style_choices, "Stable Diffusion Prompt")
         d_sync_wd14_image = bool(_get("sync_wd14_image", False))
         d_auto_fp16 = bool(_get("auto_fallback_fp16", True))
-        d_max_len = int(_get("max_len", 128))
+        d_max_len = int(_get("max_len", 160))
         d_mode = _safe_choice(_get("mode", "Append"), ["Append", "Prepend", "Replace"], "Append")
 
         with gr.Accordion("🛠️ JoyCaption", open=False):
@@ -1138,6 +1255,13 @@ class JoyCaptionUltra(scripts.Script):
                             qs_nai_mode = gr.Checkbox(label="QuickShot NovelAI weighting mode", value=bool(_get("qs_nai_mode", False)))
 
                             age_choices = ["None"] + list(AGE_PROMPT_MAP.keys()) if AGE_PROMPT_MAP else ["None", "Young Adult", "Adult", "Older Adult"]
+
+                            with gr.Row():
+                                # Single CHAR toggle. nai_mode is kept (hidden) only so the saved-settings
+                                # index stays aligned; the CHAR pipeline now gates on nai_char_mode alone.
+                                nai_mode = gr.Checkbox(label="NovelAI mode (legacy)", value=bool(_get("nai_mode", False)), visible=False)
+                                nai_char_mode = gr.Checkbox(label="🧍 Enable NovelAI CHAR blocks (split characters into CHAR: slots)", value=bool(_get("nai_char_mode", False)))
+
                             with gr.Row():
                                 age_group = gr.Dropdown(age_choices, value=_safe_choice(_get("age_group", "None"), age_choices, "None"), label="Age Group")
                                 age_strength = gr.Slider(0, 10, step=1, value=int(_get("age_strength", 0)), label="Age Strength (0–10)")
@@ -1234,7 +1358,7 @@ class JoyCaptionUltra(scripts.Script):
                     "use_manual_caption","manual_caption",
                     "rep_character","rep_setting","rep_gender","rep_age","rep_time","rep_view",
                     "gender_mode","gender_swap",
-                    "qs_nai_mode","age_group","age_strength","remove_baby_props",
+                    "nai_mode","nai_char_mode","qs_nai_mode","age_group","age_strength","remove_baby_props",
                     "time_of_day","time_weight","viewpoint","viewpoint_scale","dutch_angle",
                     "use_wd14_traits","wd14_scope","wd14_threshold","wd14_max_tags",
                     "character_override","setting_override","extra_required","extra_banned",
@@ -1248,22 +1372,34 @@ class JoyCaptionUltra(scripts.Script):
                 ok = _save_settings(d)
                 return "Saved ✅" if ok else "Save failed ❌ (check console)"
 
+            _joy_setting_components = [
+                enabled, quantization, prompt_style, sync_wd14_image, auto_fallback_fp16, max_len, mode,
+                preview_only, rewrite_caption, append_constraints, per_prompt_caption, use_wd14_batch_image,
+                use_manual_caption, manual_caption,
+                rep_character, rep_setting, rep_gender, rep_age, rep_time, rep_view,
+                gender_mode, gender_swap,
+                nai_mode, nai_char_mode,
+                qs_nai_mode,
+                age_group, age_strength, remove_baby_props,
+                time_of_day, time_weight, viewpoint, viewpoint_scale, dutch_angle,
+                use_wd14_traits, wd14_scope, wd14_threshold, wd14_max_tags,
+                character_override, setting_override, extra_required, extra_banned,
+                apply_replace_before, apply_replace_after, manual_replace_use_regex, manual_replacer,
+                switch_gender_swap_mode, switch_vaginal_to_oral, switch_cum_to_no_cum, switch_no_pubic_hair,
+                keep_vram, force_rerun, low_vram,
+            ]
+            # Let THIS plugin's Save (joycaption_ultra_settings.json) own these defaults instead of
+            # Forge's ui-config.json. Without this, ui-config tracks every labeled component and
+            # overrides the plugin's saved values on restart (resetting toggles like CHAR blocks).
+            for _c in _joy_setting_components:
+                try:
+                    _c.do_not_save_to_config = True
+                except Exception:
+                    pass
+
             save_btn.click(
                 fn=_ui_save_settings,
-                inputs=[
-                    enabled, quantization, prompt_style, sync_wd14_image, auto_fallback_fp16, max_len, mode,
-                    preview_only, rewrite_caption, append_constraints, per_prompt_caption, use_wd14_batch_image,
-                    use_manual_caption, manual_caption,
-                    rep_character, rep_setting, rep_gender, rep_age, rep_time, rep_view,
-                    gender_mode, gender_swap,
-                    qs_nai_mode, age_group, age_strength, remove_baby_props,
-                    time_of_day, time_weight, viewpoint, viewpoint_scale, dutch_angle,
-                    use_wd14_traits, wd14_scope, wd14_threshold, wd14_max_tags,
-                    character_override, setting_override, extra_required, extra_banned,
-                    apply_replace_before, apply_replace_after, manual_replace_use_regex, manual_replacer,
-                    switch_gender_swap_mode, switch_vaginal_to_oral, switch_cum_to_no_cum, switch_no_pubic_hair,
-                    keep_vram, force_rerun, low_vram
-                ],
+                inputs=_joy_setting_components,
                 outputs=[save_status]
             )
 
@@ -1274,6 +1410,7 @@ class JoyCaptionUltra(scripts.Script):
             use_manual_caption, manual_caption,
             rep_character, rep_setting, rep_gender, rep_age, rep_time, rep_view,
             gender_mode, gender_swap,
+            nai_mode, nai_char_mode,
             qs_nai_mode,
             age_group, age_strength, remove_baby_props,
             time_of_day, time_weight,
@@ -1285,6 +1422,7 @@ class JoyCaptionUltra(scripts.Script):
             switch_gender_swap_mode, switch_vaginal_to_oral, switch_cum_to_no_cum, switch_no_pubic_hair,
             keep_vram, force_rerun, low_vram,
         ]
+
 
     # ======================================================
     # WD14 bridge (aggressive discovery)
@@ -1424,6 +1562,7 @@ class JoyCaptionUltra(scripts.Script):
         use_manual_caption, manual_caption,
         rep_character, rep_setting, rep_gender, rep_age, rep_time, rep_view,
         gender_mode, gender_swap,
+        nai_mode, nai_char_mode,
         qs_nai_mode,
         age_group, age_strength, remove_baby_props,
         time_of_day, time_weight,
@@ -1523,6 +1662,9 @@ class JoyCaptionUltra(scripts.Script):
             "keep_vram": bool(keep_vram),
             "force_rerun": bool(force_rerun),
             "low_vram": bool(low_vram),
+
+            "nai_mode": bool(nai_mode),
+            "nai_char_mode": bool(nai_char_mode),
         }
 
         # store on self (SURVIVES new `p`)
@@ -1541,11 +1683,18 @@ class JoyCaptionUltra(scripts.Script):
     # process_batch (caption + inject per batch)
     # ======================================================
     def process_batch(self, p, *args, **kwargs):
+        # Prefer per-p cfg if present (survives forks)
         cfg = getattr(p, "_joycap_batch_cfg", None)
         if not isinstance(cfg, dict):
             cfg = self._active_cfg
         if not isinstance(cfg, dict) or not cfg.get("enabled"):
             return
+
+        # export dicts for other scripts (WD14 / prompt builder)
+        if not hasattr(shared, "joycaption_char_blocks") or not isinstance(getattr(shared, "joycaption_char_blocks", None), dict):
+            shared.joycaption_char_blocks = {}
+        if not hasattr(shared, "joycaption_global_blocks") or not isinstance(getattr(shared, "joycaption_global_blocks", None), dict):
+            shared.joycaption_global_blocks = {}
 
         # find prompts list in kwargs/args
         prompts = kwargs.get("prompts", None)
@@ -1660,6 +1809,7 @@ class JoyCaptionUltra(scripts.Script):
 
         captions = [""] * batch_size
 
+        # ------------- captioning -------------
         if use_manual_caption and manual_caption:
             captions = [manual_caption for _ in range(batch_size)]
         else:
@@ -1675,6 +1825,7 @@ class JoyCaptionUltra(scripts.Script):
                         img_pil=img_pil,
                         model_path=model_path,
                         quantization=quantization,
+                        structured_chars=bool(cfg.get("nai_char_mode")),
                         prompt_style=prompt_style,
                         max_len=int(max_len),
                         low_vram=bool(low_vram),
@@ -1692,6 +1843,7 @@ class JoyCaptionUltra(scripts.Script):
                         img_pil=img0,
                         model_path=model_path,
                         quantization=quantization,
+                        structured_chars=bool(cfg.get("nai_char_mode")),
                         prompt_style=prompt_style,
                         max_len=int(max_len),
                         low_vram=bool(low_vram),
@@ -1700,6 +1852,40 @@ class JoyCaptionUltra(scripts.Script):
                     )
                 captions = [cap0 for _ in range(batch_size)]
 
+        # ------------- parse structured blocks -------------
+        parsed_char_blocks = [None] * batch_size
+        _char_debug(f"🔎 [JoyCaption CHAR DEBUG] nai_char_mode={bool(cfg.get('nai_char_mode'))} prompt_style={prompt_style!r} -> CHAR pipeline {'ON' if cfg.get('nai_char_mode') else 'OFF'}")
+        if bool(cfg.get("nai_char_mode")):
+            for bi in range(batch_size):
+                gidx = base_index + bi
+                raw = captions[bi] or ""
+
+                g_tags, char_lists = parse_char_blocks(raw, max_chars=6)
+
+                # FALLBACK: model produced no [CHARx] (it often dumps everything into [GLOBAL],
+                # especially for solo images). Heuristically pull character-appearance tags into
+                # CHAR1 so we still get a split.
+                if not char_lists:
+                    _flat = _split_tags(g_tags) if g_tags else _split_tags(_strip_block_labels(raw))
+                    _ch = [t for t in _flat if any(k in t.lower() for k in _CHAR_FALLBACK_KEYWORDS)]
+                    if _ch:
+                        char_lists = [_ch]
+                        g_tags = ", ".join([t for t in _flat if t not in _ch])
+                        _char_debug(f"🔎 [JoyCaption CHAR DEBUG] gidx={gidx} FALLBACK split applied -> CHAR1 has {len(_ch)} tags")
+
+                shared.joycaption_global_blocks[gidx] = g_tags
+                shared.joycaption_char_blocks[gidx] = char_lists
+                parsed_char_blocks[bi] = char_lists
+
+                _has_markers = ("[char" in raw.lower()) or ("[global" in raw.lower())
+                _char_debug(f"🔎 [JoyCaption CHAR DEBUG] gidx={gidx} model_emitted_[CHAR/GLOBAL]_markers={_has_markers} parsed_char_blocks={len(char_lists)} global_len={len(g_tags)}")
+                _char_debug(f"🔎 [JoyCaption CHAR DEBUG] raw_caption[:300]={raw[:300]!r}")
+
+                # inject ONLY global tags (never [CHARx] labels); strip any leaked markers
+                captions[bi] = (g_tags or _strip_block_labels(captions[bi]) or "").strip()
+
+
+        # ------------- replacements / enforcement / rewrite -------------
         if apply_replace_before and manual_replacer:
             captions = [
                 self._cleanup_prompt_commas(
@@ -1743,10 +1929,6 @@ class JoyCaptionUltra(scripts.Script):
                     img_pil=img_i,
                 )
 
-                if _is_minor_age_label(str(age_group)):
-                    required_text = (required_text + ", " if required_text else "") + "fully clothed, non-sexual, safe"
-                    banned_text = (banned_text + ", " if banned_text else "") + ", ".join(WD14_SEXUAL_BAN_WORDS)
-
                 hard_rules = []
                 if rep_gender and gender_mode == "Force Male":
                     hard_rules.append("The subject MUST be male (a man/boy).")
@@ -1762,8 +1944,6 @@ class JoyCaptionUltra(scripts.Script):
                     hard_rules.append("The setting MUST match the provided Setting Override.")
                 if rep_character and character_override:
                     hard_rules.append("Character appearance MUST match the provided Character Override.")
-                if _is_minor_age_label(str(age_group)):
-                    hard_rules.append("Keep the output fully non-sexual.")
                 hard_rules_text = " ".join(hard_rules).strip()
 
                 c = captions[bi] or ""
@@ -1783,21 +1963,13 @@ class JoyCaptionUltra(scripts.Script):
 
             captions = rewritten_caps
 
-        # switches post rewrite (disabled for minors)
-        if _is_minor_age_label(str(age_group)):
-            switch_rules = self._build_switch_replacements(
-                gender_swap_mode=switch_gender_swap_mode,
-                vaginal_to_oral=False,
-                cum_to_no_cum=False,
-                no_pubic_hair=False,
-            )
-        else:
-            switch_rules = self._build_switch_replacements(
-                gender_swap_mode=switch_gender_swap_mode,
-                vaginal_to_oral=switch_vaginal_to_oral,
-                cum_to_no_cum=switch_cum_to_no_cum,
-                no_pubic_hair=switch_no_pubic_hair,
-            )
+        # switches post rewrite
+        switch_rules = self._build_switch_replacements(
+            gender_swap_mode=switch_gender_swap_mode,
+            vaginal_to_oral=switch_vaginal_to_oral,
+            cum_to_no_cum=switch_cum_to_no_cum,
+            no_pubic_hair=switch_no_pubic_hair,
+        )
 
         if switch_rules:
             captions = [
@@ -1805,7 +1977,7 @@ class JoyCaptionUltra(scripts.Script):
                     self._apply_manual_replacements(c, switch_rules, use_regex=True)
                 ) for c in captions
             ]
-            if switch_cum_to_no_cum and (not _is_minor_age_label(str(age_group))):
+            if switch_cum_to_no_cum:
                 fixed = []
                 for c in captions:
                     if c and ("no cum" not in c.lower()):
@@ -1821,6 +1993,7 @@ class JoyCaptionUltra(scripts.Script):
                 ) for c in captions
             ]
 
+        # ------------- preview mode -------------
         if preview_only:
             print("\n" + "=" * 70)
             print(f"📝 [JoyCaption PREVIEW] base_index={base_index}")
@@ -1831,11 +2004,10 @@ class JoyCaptionUltra(scripts.Script):
             print("=" * 70 + "\n")
             return
 
-        # inject into this batch list + p.all_prompts
+        # ------------- inject per prompt (FIXED) -------------
         for bi in range(batch_size):
             base = prompts[bi] or ""
-            cap = (captions[bi] or "").replace("|", " ").replace("||", " ").strip()
-
+            cap = _strip_block_labels((captions[bi] or "").replace("|", " ").replace("||", " ").replace("_", " ")).strip()
             if not cap:
                 continue
 
@@ -1865,9 +2037,6 @@ class JoyCaptionUltra(scripts.Script):
                     extra_banned=extra_banned,
                     img_pil=img_i,
                 )
-                if _is_minor_age_label(str(age_group)):
-                    required_text = (required_text + ", " if required_text else "") + "fully clothed, non-sexual, safe"
-                    banned_text = (banned_text + ", " if banned_text else "") + ", ".join(WD14_SEXUAL_BAN_WORDS)
 
                 blocks = []
                 if required_text:
@@ -1877,34 +2046,54 @@ class JoyCaptionUltra(scripts.Script):
                 if extra_instr:
                     blocks.append(f"[EXTRA: {extra_instr}]")
                 if blocks:
-                    cap = f"{cap} " + " ".join(blocks)
+                    cap = (cap + " " + " ".join(blocks)).strip()
 
-            if mode == "Append":
-                new_p = f"{base}, {cap}".strip(", ").strip() if base else cap
-            elif mode == "Prepend":
-                new_p = f"{cap}, {base}".strip(", ").strip() if base else cap
-            else:
-                new_p = cap
+            # ✅ Always inject GLOBAL before any existing CHAR blocks
+            new_p = inject_global_before_chars(base, cap, mode=mode, token="CHAR:")
 
-            if rep_gender and gender_mode in ("Force Male", "Force Female"):
-                new_p = self._enforce_force_gender_text(new_p, gender_mode)
+            # ✅ If NovelAI CHAR mode is enabled: merge per-prompt
+            if cfg.get("nai_char_mode"):
+                jc_blocks = parsed_char_blocks[bi] if isinstance(parsed_char_blocks, list) else None
+                if jc_blocks and isinstance(jc_blocks, list) and len(jc_blocks) > 0:
+                    try:
+                        # preferred signature (if your helper supports it)
+                        new_p = merge_chars_into_prompt(new_p, jc_blocks, token="CHAR:", mode=mode)
+                    except TypeError:
+                        # fallback if helper has a simpler signature
+                        new_p = merge_chars_into_prompt(new_p, jc_blocks)
+                    except Exception as e:
+                        print(f"⚠️ [JoyCaption] merge_chars_into_prompt failed: {e}")
 
+            _char_debug(f"🔎 [JoyCaption CHAR DEBUG] bi={bi} final prompt has 'CHAR:' = {'CHAR:' in new_p} | final[:300]={new_p[:300]!r}")
+
+            # ✅ write back to the live batch prompts
             prompts[bi] = new_p
 
+            # ✅ ALSO write back into p.all_prompts for forks that ignore `prompts`
             try:
-                gi = base_index + bi
                 if hasattr(p, "all_prompts") and isinstance(p.all_prompts, list):
+                    gi = base_index + bi
                     if 0 <= gi < len(p.all_prompts):
                         p.all_prompts[gi] = new_p
-                if hasattr(p, "prompts") and isinstance(p.prompts, list):
-                    if 0 <= gi < len(p.prompts):
-                        p.prompts[gi] = new_p
-                if batch_size == 1 and hasattr(p, "prompt"):
-                    p.prompt = new_p
             except Exception:
                 pass
 
+        # Best-effort sync for other forks
+        try:
+            if hasattr(p, "prompt") and isinstance(p.prompt, str) and prompts:
+                p.prompt = prompts[0]
+        except Exception:
+            pass
+
+        try:
+            if hasattr(p, "prompts") and isinstance(p.prompts, list) and prompts:
+                p.prompts[:len(prompts)] = list(prompts)
+        except Exception:
+            pass
+
         print("✅ [JoyCaption] Injected prompts for this batch.")
+
+
 
     def postprocess(self, p, processed, *args):
         cfg = getattr(p, "_joycap_batch_cfg", None)

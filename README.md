@@ -27,6 +27,11 @@ Turn reference images into usable prompts fast, keep **batches in-sync**, and op
   - ONNX inference → danbooru-style tag payloads
   - folder + Pixiv cache + single image sources
   - fusion modes (combine / replace) for **character swapping**
+- **NovelAI CHAR Blocks (multi-character)** 🆕
+  - split each character's traits into NovelAI `CHAR:` slots
+  - **YOLO per-person detection** → reliable multi-character splitting from a single image
+  - one-click **➕ Add CHAR Blocks to Prompt** (no copy-paste); merges into your existing prompt
+  - NovelAI-V4 correct: spaces (not underscores), counts stay global, characters ordered left→right
 - **QuickShot Prompt Director**
   - deterministic prompt steering for consistent sets
   - age/time/view/camera/light controls
@@ -60,6 +65,8 @@ This prevents:
 https://github.com/TdogCreations/ReForge-Prompt-Director
 4. Click **Install**
 5. Restart WebUI
+
+> **Python deps:** WD14 needs `onnxruntime` + `pandas`, multi-character detection needs `ultralytics`, and JoyCaption needs `transformers` (+ `bitsandbytes` for 4/8-bit). A `requirements.txt` is included so ReForge installs the core ones automatically on first load.
 ---
 
 ## 📥 Required Model Downloads
@@ -270,6 +277,27 @@ Use it for consistent sets.
 - blur steering
 
 QuickShot works even if WD14/JoyCaption are disabled.
+
+---
+
+## 🧬 NovelAI CHAR Blocks (Multi-Character)
+
+Split a character's traits into NovelAI **`CHAR:`** blocks so each character gets their own prompt slot — instead of one flat tag soup. Scene/background tags stay in the global section above the blocks.
+
+### From WD14 (most accurate)
+In **WD14 Tagger → 🧬 NAI CHAR Blocks**:
+- **➕ Add CHAR Blocks to Prompt** — tags the loaded image and writes the CHAR blocks **straight into your prompt box** (no copy-paste). It **merges** into whatever you've already typed, preserving your existing `CHAR:` slots.
+- **🧍 Build CHAR Blocks (to box)** — fills an output box for review/copy instead.
+- **🔍 Auto-detect characters (YOLO)** — finds **every person** in Image 1, crops each, and tags them **separately** → `CHAR1` = leftmost person, `CHAR2` = next, etc. (up to 6). This is the reliable way to separate multiple characters from one image.
+
+It also runs **automatically during generation**: with **Enable NovelAI CHAR blocks** on, each detected person gets their own CHAR slot in the injected prompt.
+
+### From JoyCaption
+Turn on the single **🧍 Enable NovelAI CHAR blocks** toggle. JoyCaption produces a structured `[GLOBAL]` / `[CHARx]` caption that's parsed into `CHAR:` slots. If the model doesn't split cleanly, a built-in fallback pulls character-appearance tags into CHAR1 so you still get a block.
+
+### Notes
+- Multi-character detection uses **YOLO** (the `ultralytics` package). On first use it auto-downloads `yolov8n.pt` (~6 MB). To use your own detector, set **Settings → WD14 Tagger → YOLO model for multi-char detection** (`.pt` path).
+- CHAR-pipeline console logging is off by default; enable **Settings → JoyCaption → Print CHAR-block debug to console** if you need to troubleshoot.
 
 ---
 
